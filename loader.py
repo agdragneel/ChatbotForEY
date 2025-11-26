@@ -19,20 +19,34 @@ logger = logging.getLogger(__name__)
 class DocumentLoader:
     """Handles loading and processing of various document types"""
     
-    def __init__(self, docs_folder: str = "docs"):
+    def __init__(
+        self, 
+        docs_folder: str = "docs",
+        video_frame_interval: int = 5,
+        video_max_frames: int = 50,
+        whisper_model: str = "base"
+    ):
         """
         Initialize document loader
         
         Args:
             docs_folder: Path to the documents folder
+            video_frame_interval: Seconds between frame extractions for videos
+            video_max_frames: Maximum number of frames to extract per video
+            whisper_model: Whisper model to use for audio transcription (base, small, medium, large)
         """
         self.docs_folder = docs_folder
         self.loaded_files = []
-        self.supported_extensions = ['.txt', '.pdf', '.png', '.jpg', '.jpeg', '.docx', '.doc']
+        self.supported_extensions = ['.txt', '.pdf', '.png', '.jpg', '.jpeg', '.docx', '.doc', '.mp4']
+        self.video_frame_interval = video_frame_interval
+        self.video_max_frames = video_max_frames
+        self.whisper_model_name = whisper_model
+        self.whisper_model = None  # Lazy load when needed
         
         # Create docs folder if it doesn't exist
         os.makedirs(self.docs_folder, exist_ok=True)
         logger.info(f"Document loader initialized for folder: {self.docs_folder}")
+        logger.info(f"Video config: {video_frame_interval}s interval, max {video_max_frames} frames, Whisper: {whisper_model}")
         
         # Initialize OpenAI client for image captioning
         hf_token = os.environ.get("HF_TOKEN")
@@ -101,6 +115,8 @@ class DocumentLoader:
             return self._load_image(file_path)
         elif extension in ['.docx', '.doc']:
             return self._load_docx(file_path)
+        elif extension == '.mp4':
+            return self._load_video(file_path)
         else:
             logger.warning(f"Unsupported file type: {extension}")
             return []
@@ -263,3 +279,221 @@ class DocumentLoader:
         
         logger.info(f"Created {len(chunks)} chunks from {source}")
         return chunks
+    
+    def _load_video(self, file_path: Path) -> List[Dict[str, str]]:
+        """
+        Load and process a video file by:
+        1. Extracting and transcribing audio
+        2. Extracting key frames and generating visual descriptions
+        3. Combining both into a comprehensive summary
+        """
+        try:
+            import cv2
+            import whisper
+            import tempfile
+            import numpy as np
+            
+            logger.info(f"Processing video: {file_path.name}")
+            
+            if not self.client:
+                logger.warning(f"Cannot process video {file_path.name}: HF_TOKEN not set")
+                return []
+            
+            # Open video file
+            video = cv2.VideoCapture(str(file_path))
+            if not video.isOpened():
+                logger.error(f"Failed to open video: {file_path.name}")
+                return []
+            
+            # Get video properties
+            fps = video.get(cv2.CAP_PROP_FPS)
+            frame_count_total = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count_total / fps if fps > 0 else 0
+            
+            logger.info(f"Video duration: {duration:.2f}s, FPS: {fps:.2f}, Total frames: {frame_count_total}")
+            
+            # PART 1: Audio Transcription
+            transcript_segments = []
+            try:
+                logger.info("Starting audio transcription...")
+                
+                # Load Whisper model (lazy loading)
+                if self.whisper_model is None:
+                    logger.info(f"Loading Whisper model: {self.whisper_model_name}")
+                    try:
+                        self.whisper_model = whisper.load_model(self.whisper_model_name)
+                        logger.info("Whisper model loaded successfully")
+                    except Exception as model_error:
+                        logger.error(f"Failed to load Whisper model: {str(model_error)}", exc_info=True)
+                        raise
+                
+                # Transcribe audio directly from video file
+                logger.info(f"Transcribing audio from {file_path.name} with Whisper...")
+                logger.info(f"Video file path: {str(file_path)}")
+                
+                result = self.whisper_model.transcribe(
+                    str(file_path),
+                    verbose=True,  # Enable verbose for debugging
+                    word_timestamps=False,
+                    fp16=False  # Disable FP16 for compatibility
+                )
+                
+                logger.info(f"Whisper transcription result keys: {result.keys()}")
+                logger.info(f"Detected language: {result.get('language', 'unknown')}")
+                
+                transcript_segments = result.get('segments', [])
+                full_text = result.get('text', '')
+                
+                logger.info(f"Transcription complete: {len(transcript_segments)} segments")
+                logger.info(f"Full transcript length: {len(full_text)} characters")
+                
+                # Log sample of transcript
+                if transcript_segments:
+                    sample_text = transcript_segments[0]['text'][:100]
+                    logger.info(f"Transcript sample: {sample_text}...")
+                elif full_text:
+                    logger.info(f"Full text sample: {full_text[:100]}...")
+                else:
+                    logger.warning("No transcript text found - video may not have audio")
+                
+            except Exception as e:
+                logger.error(f"Audio transcription failed: {str(e)}", exc_info=True)
+                logger.info("Continuing with video-only processing")
+            
+            # PART 2: Visual Frame Analysis
+            frame_descriptions = []
+            
+            # Calculate frame extraction parameters
+            frame_interval_frames = int(fps * self.video_frame_interval)
+            total_frames_to_extract = min(
+                self.video_max_frames,
+                max(1, int(duration / self.video_frame_interval))
+            )
+            
+            # Adjust interval if we would exceed max frames
+            if total_frames_to_extract >= self.video_max_frames:
+                frame_interval_frames = max(1, frame_count_total // self.video_max_frames)
+            
+            logger.info(f"Extracting {total_frames_to_extract} frames at {frame_interval_frames} frame intervals")
+            
+            frame_num = 0
+            extracted_count = 0
+            
+            while extracted_count < total_frames_to_extract:
+                # Set video position
+                video.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = video.read()
+                
+                if not ret:
+                    break
+                
+                timestamp = frame_num / fps
+                logger.info(f"Frame {extracted_count + 1}/{total_frames_to_extract}: Analyzing frame at {timestamp:.2f}s")
+                
+                try:
+                    # Convert frame to JPEG
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                    
+                    # Analyze frame with vision model
+                    completion = self.client.chat.completions.create(
+                        model=self.vision_model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Describe what is shown in this video frame. Focus on key visual elements, actions, text, or important information."
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{frame_base64}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=300,
+                    )
+                    
+                    description = completion.choices[0].message.content
+                    frame_descriptions.append({
+                        'timestamp': timestamp,
+                        'description': description
+                    })
+                    
+                    logger.info(f"Frame {extracted_count + 1} analyzed successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Error analyzing frame at {timestamp:.2f}s: {str(e)}")
+                
+                extracted_count += 1
+                frame_num += frame_interval_frames
+            
+            video.release()
+            logger.info(f"Frame extraction complete: {len(frame_descriptions)} frames analyzed")
+            
+            # PART 3: Combine Visual and Audio Data
+            logger.info("Combining visual and audio data...")
+            
+            # Create comprehensive chunks
+            chunks = []
+            
+            # Strategy: Create time-based chunks that combine nearby visual and audio
+            chunk_duration = 30  # seconds per chunk
+            num_chunks = max(1, int(duration / chunk_duration) + 1)
+            
+            for i in range(num_chunks):
+                chunk_start = i * chunk_duration
+                chunk_end = min((i + 1) * chunk_duration, duration)
+                
+                # Gather frames in this time range
+                chunk_frames = [
+                    f"[{fd['timestamp']:.1f}s] {fd['description']}"
+                    for fd in frame_descriptions
+                    if chunk_start <= fd['timestamp'] < chunk_end
+                ]
+                
+                # Gather transcript segments in this time range
+                chunk_transcript = [
+                    f"[{seg['start']:.1f}s] {seg['text']}"
+                    for seg in transcript_segments
+                    if chunk_start <= seg['start'] < chunk_end
+                ]
+                
+                # Only create chunk if there's content
+                if chunk_frames or chunk_transcript:
+                    chunk_text_parts = [f"[Video: {file_path.name}]"]
+                    chunk_text_parts.append(f"[Time: {chunk_start:.1f}s - {chunk_end:.1f}s]")
+                    
+                    if chunk_frames:
+                        chunk_text_parts.append("\nVisual Content:")
+                        chunk_text_parts.extend(chunk_frames)
+                    
+                    if chunk_transcript:
+                        chunk_text_parts.append("\nAudio Transcript:")
+                        chunk_text_parts.extend(chunk_transcript)
+                    
+                    chunks.append({
+                        'text': '\n'.join(chunk_text_parts),
+                        'source': file_path.name,
+                        'type': 'video',
+                        'time_range': f"{chunk_start:.1f}s-{chunk_end:.1f}s"
+                    })
+            
+            logger.info(f"Successfully processed video with {len(chunks)} chunks")
+            logger.info(f"  - Visual frames: {len(frame_descriptions)}")
+            logger.info(f"  - Audio segments: {len(transcript_segments)}")
+            
+            return chunks
+            
+        except ImportError as e:
+            logger.error(f"Missing required library for video processing: {str(e)}")
+            logger.error("Please install: pip install opencv-python openai-whisper")
+            return []
+        except Exception as e:
+            logger.error(f"Error loading video {file_path.name}: {str(e)}", exc_info=True)
+            return []
+

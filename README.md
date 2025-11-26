@@ -5,8 +5,9 @@ A production-ready AI-powered onboarding chatbot built with Streamlit, HuggingFa
 ## Features
 
 ✅ **RAG-based Question Answering** - Retrieves relevant context from documents before generating answers
-✅ **Multi-format Document Support** - Handles .txt, .pdf, .docx, .doc, and images (.png, .jpg, .jpeg)
+✅ **Multi-format Document Support** - Handles .txt, .pdf, .docx, .doc, images (.png, .jpg, .jpeg), and videos (.mp4)
 ✅ **Vision-powered Image Understanding** - Automatically captions images using Qwen VL model
+✅ **Video Processing** - Extracts frames for visual analysis + transcribes audio with Whisper
 ✅ **FAISS Vector Search** - Fast and efficient similarity search
 ✅ **Interactive Chat Interface** - Clean Streamlit UI with chat history
 ✅ **Source Attribution** - Shows which documents were used to answer questions
@@ -89,6 +90,7 @@ Supported formats:
 - `.pdf` - PDF documents
 - `.docx`, `.doc` - Word documents
 - `.png`, `.jpg`, `.jpeg` - Images (will be auto-captioned)
+- `.mp4` - Videos (frames analyzed + audio transcribed)
 
 ### 5. Run the Application
 
@@ -172,10 +174,16 @@ Log levels:
 - Add at least one supported document
 - Click "Rebuild Vector Store"
 
-### Image captioning not working
+### Image/Video captioning not working
 - Verify HF_TOKEN is set correctly
 - Check internet connection
 - Review logs for API errors
+
+### Video processing slow
+- Videos are processed frame-by-frame with audio transcription
+- Reduce `video_max_frames` or increase `video_frame_interval` in loader.py
+- Use shorter videos for faster processing
+- Check logs for detailed progress
 
 ### Slow performance
 - Reduce chunk_size in loader.py
@@ -192,6 +200,8 @@ Log levels:
 ## Model Information
 
 - **LLM**: Qwen/Qwen2.5-VL-7B-Instruct:hyperbolic (via HuggingFace Router)
+- **Vision Model**: Qwen/Qwen2.5-VL-7B-Instruct (for images and video frames)
+- **Audio Transcription**: OpenAI Whisper (base model, runs locally)
 - **Embeddings**: all-MiniLM-L6-v2 (sentence-transformers)
 - **Vector Store**: FAISS (CPU version)
 

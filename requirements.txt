@@ -7,3 +7,5 @@ Pillow
 python-docx
 numpy
 python-dotenv
+opencv-python
+openai-whisper
